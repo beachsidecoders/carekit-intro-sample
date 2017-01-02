@@ -1,0 +1,3 @@
+[submodule "Vendor/CareKit"]
+	path = Vendor/CareKit
+	url = https://github.com/carekit-apple/CareKit.git
