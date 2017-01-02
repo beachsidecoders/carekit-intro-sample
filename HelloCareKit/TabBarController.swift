@@ -33,10 +33,28 @@ class TabBarController: UITabBarController {
             try! fileManager.createDirectory(at: url, withIntermediateDirectories: true, attributes: nil)
         }
         
-        return OCKCarePlanStore(persistenceDirectoryURL: url)
+        let store = OCKCarePlanStore(persistenceDirectoryURL: url)
+        store.delegate = self
+        return store
     }()
     
     let activityStartDate = DateComponents(year: 2016, month: 1, day: 1)
+    let calendar = Calendar(identifier: .gregorian)
+    lazy var monthDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd"
+        return formatter
+    }()
+    var today: Date {
+        return Date()
+    }
+    
+    var insights: OCKInsightsViewController!
+    var insightItems = [OCKInsightItem]() {
+        didSet {
+            insights.items = insightItems
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -47,10 +65,14 @@ class TabBarController: UITabBarController {
         let symptomTracker = OCKSymptomTrackerViewController(carePlanStore: carePlanStore)
         symptomTracker.title = "Measurements"
         symptomTracker.delegate = self
+        insights = OCKInsightsViewController(insightItems: insightItems)
+        insights.title = "Insights"
+        updateInsights()
         
         viewControllers = [
             UINavigationController(rootViewController: careCard),
-            UINavigationController(rootViewController: symptomTracker)
+            UINavigationController(rootViewController: symptomTracker),
+            UINavigationController(rootViewController: insights)
         ]
     }
     
@@ -87,6 +109,119 @@ class TabBarController: UITabBarController {
         let weightAssessment = OCKCarePlanActivity.assessment(withIdentifier: "weight", groupIdentifier: nil, title: "Weight", text: "How much do you weigh?", tintColor: .brown, resultResettable: true, schedule: oncePerDaySchedule, userInfo: nil)
         
         return [sleepAssessment, weightAssessment]
+    }
+    
+    func updateInsights() {
+        self.insightItems = []
+        
+        var sleep = [DateComponents: Int]()
+        var interventionCompletion = [DateComponents: Int]()
+        
+        let activitiesDispatchGroup = DispatchGroup()
+        
+        activitiesDispatchGroup.enter()
+        fetchSleep { sleepDict in
+            sleep = sleepDict
+            activitiesDispatchGroup.leave()
+        }
+        
+        activitiesDispatchGroup.enter()
+        fetchInterventionCompletion { interventionCompletionDict in
+            interventionCompletion = interventionCompletionDict
+            activitiesDispatchGroup.leave()
+        }
+        
+        activitiesDispatchGroup.notify(queue: .main) {
+            if let sleepMessage = self.sleepMessage(sleep: sleep) {
+                self.insightItems.append(sleepMessage)
+            }
+            self.insightItems.append(self.interventionBarChart(interventionCompletion: interventionCompletion, sleep: sleep))
+        }
+    }
+    
+    func fetchSleep(completion: @escaping ([DateComponents: Int]) -> ()) {
+        var sleep = [DateComponents: Int]()
+        
+        let sleepStartDate = calendar.dateComponents([.year, .month, .day], from: calendar.date(byAdding: DateComponents(day: -7), to: today)!)
+        let sleepEndDate = calendar.dateComponents([.year, .month, .day], from: calendar.date(byAdding: DateComponents(day: -1), to: today)!)
+        
+        carePlanStore.activity(forIdentifier: "sleep") { [unowned self] (_, activity, error) in
+            if let error = error {
+                print(error.localizedDescription)
+            }
+            guard let sleepAssessment = activity else { return }
+            self.carePlanStore.enumerateEvents(of: sleepAssessment, startDate: sleepStartDate, endDate: sleepEndDate, handler: { (event, _) in
+                guard let event = event else { return }
+                if let result = event.result {
+                    sleep[event.date] = Int(result.valueString)!
+                } else {
+                    sleep[event.date] = 0
+                }
+            }, completion: { (_, error) in
+                if let error = error {
+                    print(error.localizedDescription)
+                }
+                completion(sleep)
+            })
+        }
+    }
+    
+    func fetchInterventionCompletion(completion: @escaping ([DateComponents: Int]) -> ()) {
+        var interventionCompletion = [DateComponents: Int]()
+        
+        let interventionStartDate = calendar.dateComponents([.year, .month, .day], from: calendar.date(byAdding: DateComponents(day: -7), to: today)!)
+        let interventionEndDate = calendar.dateComponents([.year, .month, .day], from: calendar.date(byAdding: DateComponents(day: -1), to: today)!)
+        
+        carePlanStore.dailyCompletionStatus(with: .intervention, startDate: interventionStartDate, endDate: interventionEndDate, handler: { (date, completed, total) in
+            interventionCompletion[date] = lround((Double(completed) / Double(total)) * 100)
+        }, completion: { (_, error) in
+            if let error = error {
+                print(error.localizedDescription)
+            }
+            completion(interventionCompletion)
+        })
+    }
+    
+    func sleepMessage(sleep: [DateComponents: Int]) -> OCKMessageItem? {
+        let sleepAverage = Double(sleep.values.reduce(0) { $0 + $1 }) / Double(sleep.count)
+        let sleepAverageInt = lround(sleepAverage)
+        
+        if sleepAverage < 6 {
+            let averageAlert = OCKMessageItem(title: "Sleep More", text: "You only got an average of \(sleepAverageInt) hours of sleep this week.", tintColor: .purple, messageType: .alert)
+            return averageAlert
+        } else if sleep.values.max()! - sleep.values.min()! >= 3 {
+            let consistentAlert = OCKMessageItem(title: "Be More Consistent", text: "Try to get the same amount of sleep each night to stay healthy.", tintColor: .purple, messageType: .alert)
+            return consistentAlert
+        } else if sleepAverage > 7.5 {
+            let averageTip = OCKMessageItem(title: "Maintain Sleep Habits", text: "Nice job getting a lot of sleep last week. Keep it up!", tintColor: .purple, messageType: .tip)
+            return averageTip
+        }
+        return nil
+    }
+    
+    func interventionBarChart(interventionCompletion: [DateComponents: Int], sleep: [DateComponents: Int]) -> OCKBarChart {
+        let sortedDates = interventionCompletion.keys.sorted() {
+            calendar.dateComponents([.second], from: $0, to: $1).second! > 0
+        }
+        let formattedDates = sortedDates.map {
+            monthDayFormatter.string(from: calendar.date(from: $0)!)
+        }
+        
+        let interventionValues = sortedDates.map { interventionCompletion[$0]! }
+        let interventionSeries = OCKBarSeries(title: "Care Completion", values: interventionValues as [NSNumber], valueLabels: interventionValues.map { "\($0)%" }, tintColor: .red)
+        
+        let sleepNumbers = sortedDates.map { sleep[$0]! }
+        let sleepValues: [Double]
+        if sleep.values.max()! > 0 {
+            let singleHourWidth = 100.0 / Double(sleep.values.max()!)
+            sleepValues = sleepNumbers.map { singleHourWidth * Double($0) }
+        } else {
+            sleepValues = sleepNumbers.map { _ in 0 }
+        }
+        let sleepSeries = OCKBarSeries(title: "Sleep", values: sleepValues as [NSNumber], valueLabels: sleepNumbers.map { "\($0)" }, tintColor: .purple)
+        
+        let interventionBarChart = OCKBarChart(title: "Care Completion to Sleep", text: "See how completing your care plan affects how much you sleep.", tintColor: nil, axisTitles: formattedDates, axisSubtitles: nil, dataSeries: [interventionSeries, sleepSeries], minimumScaleRangeValue: 0, maximumScaleRangeValue: 100)
+        return interventionBarChart
     }
 
 }
@@ -149,6 +284,14 @@ extension TabBarController: OCKSymptomTrackerViewControllerDelegate {
         alert.addAction(doneAction)
         
         return alert
+    }
+    
+}
+
+extension TabBarController: OCKCarePlanStoreDelegate {
+    
+    func carePlanStore(_ store: OCKCarePlanStore, didReceiveUpdateOf event: OCKCarePlanEvent) {
+        updateInsights()
     }
     
 }
