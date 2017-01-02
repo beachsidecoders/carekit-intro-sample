@@ -55,10 +55,13 @@ class TabBarController: UITabBarController {
             insights.items = insightItems
         }
     }
+    
+    var contacts = [OCKContact]()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         addActivities()
+        addContacts()
         
         let careCard = OCKCareCardViewController(carePlanStore: carePlanStore)
         careCard.title = "Care"
@@ -68,11 +71,15 @@ class TabBarController: UITabBarController {
         insights = OCKInsightsViewController(insightItems: insightItems)
         insights.title = "Insights"
         updateInsights()
+        let connect = OCKConnectViewController(contacts: contacts)
+        connect.title = "Connect"
+        connect.delegate = self
         
         viewControllers = [
             UINavigationController(rootViewController: careCard),
             UINavigationController(rootViewController: symptomTracker),
-            UINavigationController(rootViewController: insights)
+            UINavigationController(rootViewController: insights),
+            UINavigationController(rootViewController: connect)
         ]
     }
     
@@ -223,6 +230,13 @@ class TabBarController: UITabBarController {
         let interventionBarChart = OCKBarChart(title: "Care Completion to Sleep", text: "See how completing your care plan affects how much you sleep.", tintColor: nil, axisTitles: formattedDates, axisSubtitles: nil, dataSeries: [interventionSeries, sleepSeries], minimumScaleRangeValue: 0, maximumScaleRangeValue: 100)
         return interventionBarChart
     }
+    
+    func addContacts() {
+        let doctor = OCKContact(contactType: .careTeam, name: "Dr. John Smith", relation: "Doctor", contactInfoItems: [.phone("(888) 555-8361"), .sms("(888) 555-8361"), .email("jsmith2@example.com")], tintColor: nil, monogram: nil, image: nil)
+        let mom = OCKContact(contactType: .personal, name: "Jane Doe", relation: "Mom", contactInfoItems: [.phone("(888) 555-2346"), .facetimeVideo("(888) 555-2342", display: "(888) 555-2342")], tintColor: nil, monogram: nil, image: nil)
+        
+        contacts = [doctor, mom]
+    }
 
 }
 
@@ -292,6 +306,43 @@ extension TabBarController: OCKCarePlanStoreDelegate {
     
     func carePlanStore(_ store: OCKCarePlanStore, didReceiveUpdateOf event: OCKCarePlanEvent) {
         updateInsights()
+    }
+    
+}
+
+extension TabBarController: OCKConnectViewControllerDelegate {
+    
+    func connectViewController(_ connectViewController: OCKConnectViewController, didSelectShareButtonFor contact: OCKContact, presentationSourceView sourceView: UIView?) {
+        var sleep = [DateComponents: Int]()
+        
+        let sleepDispatchGroup = DispatchGroup()
+        
+        sleepDispatchGroup.enter()
+        fetchSleep { sleepDict in
+            sleep = sleepDict
+            sleepDispatchGroup.leave()
+        }
+        
+        sleepDispatchGroup.notify(queue: .main) {
+            let paragraph = OCKDocumentElementParagraph(content: "A really cool paragraph. You can include whatever you want in here.")
+            let subtitle = OCKDocumentElementSubtitle(subtitle: "This Week's Sleep")
+            
+            let formattedDates = sleep.keys.sorted(by: {
+                self.calendar.dateComponents([.second], from: $0, to: $1).second! > 0
+            }).map { self.monthDayFormatter.string(from: self.calendar.date(from: $0)!) }
+            let table = OCKDocumentElementTable(headers: formattedDates, rows: [sleep.values.map { "\($0) hrs" }])
+            
+            let careDocument = OCKDocument(title: "Care Data", elements: [paragraph, subtitle, table])
+            careDocument.createPDFData { (pdfData, error) in
+                let activityVC = UIActivityViewController(activityItems: [pdfData], applicationActivities: nil)
+                activityVC.popoverPresentationController?.sourceView = sourceView
+                self.present(activityVC, animated: true, completion: nil)
+            }
+        }
+    }
+    
+    func connectViewController(_ connectViewController: OCKConnectViewController, titleForSharingCellFor contact: OCKContact) -> String? {
+        return "Share Care Data with \(contact.name)"
     }
     
 }
